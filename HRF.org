@@ -22,6 +22,7 @@ Using the scipy library, which provides an implementation of the gamma pdf param
 #+begin_src python :tangle yani/hrfs.py
 from dataclasses import dataclass
 from scipy.stats import gamma
+from scipy import signal
 import numpy as np
 
 
@@ -53,9 +54,9 @@ class DoubleGammaHRF:
         )
         return hrf
 
-    def transform(self, signal: np.array, tr=0.02):
+    def transform(self, timeseries: np.array, tr=0.02):
         sample_times = np.arange(0, 32, tr)  # Sample 30 seconds at 20ms intervals.
-        convolved = np.convolve(signal, self.sample(sample_times))
+        convolved = np.convolve(timeseries, self.sample(sample_times))
         # The return size of the convolved signal is len(signal) + len(sample_times) +1.
         # To get what we want we need to discard the extra time.
         return convolved[: -(len(sample_times) - 1)]
@@ -78,7 +79,7 @@ plt.legend()
 
 #+RESULTS:
 :RESULTS:
-: <matplotlib.legend.Legend at 0x171593c40>
+: <matplotlib.legend.Legend at 0x16ad20bb0>
 #+attr_org: :width 380
 [[file:./.ob-jupyter/1224e9dba4f53a640b15489415d8a1c8320b75e5.png]]
 :END:
@@ -91,7 +92,7 @@ So now let us implement a stimulus and check what it looks like convolved with t
 #+begin_src python :tangle yani/hrfs.py
 @dataclass
 class SinusoidalStimulus:
-    start_offset: float = 14
+    start_offset: float = 0
     frequency: float = 0.2
     exponent: float = 1.
     luminance: float = 1.
@@ -113,8 +114,8 @@ class SinusoidalStimulus:
 
 
 #+begin_src python
-tr = 0.874
-t = np.arange(0, 300, tr)
+tr = 0.01
+t = np.arange(0, 400, tr)
 stim = SinusoidalStimulus().sample(t)
 
 plt.plot(t, stim)
@@ -123,9 +124,9 @@ plt.plot(t, DoubleGammaHRF().transform(stim, tr))
 
 #+RESULTS:
 :RESULTS:
-| <matplotlib.lines.Line2D | at | 0x171376250> |
-#+attr_org: :width 372
-[[file:./.ob-jupyter/7d3becc50bfe5299217776c334b77ee0ff65071a.png]]
+| <matplotlib.lines.Line2D | at | 0x168baef10> |
+#+attr_org: :width 375
+[[file:./.ob-jupyter/682332f9be8556b70017a7008bd7e0b6fdc4bb61.png]]
 :END:
 
 Note that because we are scaling the HRF, we cannot directly interpret the amplitude of our response unless we renormalize it. For that we can use the convolved response we obtain for a given stimulus as a reference, and the maximum amplitude of that response we set to our normalization factor.
@@ -134,19 +135,19 @@ So let's do just that, setting as a reference the response to a stimulus of freq
 
 #+begin_src python
 # Normalization factor
-reference_stim = SinusoidalStimulus(frequency=0.005).sample(t)
+reference_stim = SinusoidalStimulus(frequency=0.05).sample(t)
 convolved_response = DoubleGammaHRF().transform(reference_stim, tr)
 
 plt.plot(t, reference_stim)
 plt.plot(t, convolved_response)
 
-normalization_factor = convolved_response.max()
+normalization_factor = convolved_response.max() - convolved_response.min()
 #+end_src
 
 #+RESULTS:
 :RESULTS:
-#+attr_org: :width 372
-[[file:./.ob-jupyter/1d6ee0dd8b737a5d30135149de3d7305ce1fa03f.png]]
+#+attr_org: :width 383
+[[file:./.ob-jupyter/af0714838c7dce72e21674500f2607cf27da9ae3.png]]
 :END:
 
 And now we can replot the previous figure, using our renormalization factor for scaling:
@@ -158,7 +159,98 @@ plt.plot(t, DoubleGammaHRF().transform(stim, tr)/normalization_factor)
 
 #+RESULTS:
 :RESULTS:
-| <matplotlib.lines.Line2D | at | 0x171434f40> |
+| <matplotlib.lines.Line2D | at | 0x16af1a310> |
 #+attr_org: :width 372
-[[file:./.ob-jupyter/827a8cac79e3f8f9bf32037f7d9037a850aea9b0.png]]
+[[file:./.ob-jupyter/76ec0482ac851eaf2203438110fde2322918d10e.png]]
 :END:
+
+Since we have a normalization factor, we can move on and see how the relative amplitude decays as a function of frequency. As a side note, the following plot is a reproduction of panel D of figure 1 in Lewis et al. 2016, the fast oscillations with fMRI paper.
+
+What we'll do is loop through frequencies, convolve them with the HRF and see how the amplitude is changing. For that we'll only look at the steady-state oscillatory response, from seconds 200 to 500.
+
+#+begin_src python
+index_200 = np.abs((t - 200.0)).argmin()
+#+end_src
+
+#+RESULTS:
+
+#+begin_src python :tangle yani/hrfs.py
+def response_amplitude(signal: np.array, start_idx: int):
+    "Get max amplitude from oscillation as peak - drought amplitude"
+    cropped_signal = signal[start_idx:]
+    return cropped_signal.max() - cropped_signal.min()
+#+end_src
+
+#+RESULTS:
+
+#+begin_src python
+frequencies = np.arange(0.05, 0.5, 0.005)
+amplitudes = []
+for frequency in frequencies:
+    stimulus = SinusoidalStimulus(frequency=frequency).sample(t)
+    response = DoubleGammaHRF().transform(stimulus, tr)/normalization_factor
+    amplitudes.append(response_amplitude(response, index_200))
+
+plt.plot(frequencies, amplitudes)
+plt.ylabel("Response amplitude relative to 0.05 Hz")
+plt.xlabel("Stimulus Frequency (Hz)")
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: Text(0.5, 0, 'Stimulus Frequency (Hz)')
+#+attr_org: :width 386
+[[file:./.ob-jupyter/435315ca519d95fe5dd07ec473e44802cfd37059.png]]
+:END:
+
+Similar to the attenuation profile, we can also compute a phase shift profile, which gives us the amount of delay (in seconds) between the input stimulation and the output response.
+
+
+#+begin_src python :tangle yani/hrfs.py
+def response_delay(reference_stimulus: np.array, response: np.array, tr: float, frequency: float):
+    """Get phase shift by computing the cross correlation between signals.
+    Since we know that the stimulus comes first, we can constrain the estimation to show us a positive delay only, and return it constrained to the first cycle of the oscillatory response (since a delay of 2 cycles is meaningless).
+    """
+
+    correlation = signal.correlate(reference_stimulus, response, mode="same")[len(response)//2:]
+    lags = signal.correlation_lags(reference_stimulus.size, response.size, mode="same")[len(response)//2:]
+    lag = lags[np.argmax(correlation)]
+    return 1/frequency  - (lag * tr)
+#+end_src
+
+#+RESULTS:
+
+#+begin_src python
+delays = []
+
+# plot an example for us to know that things are working correctly.
+test_freq = 0.2
+test_stim = SinusoidalStimulus(frequency=test_freq).sample(t)
+test_response = DoubleGammaHRF().transform(test_stim, tr)/normalization_factor
+test_phase = response_delay(test_stim[index_200:], test_response[index_200:], tr, test_freq)
+plt.figure()
+plt.plot(test_stim[index_200//2:index_200])
+plt.plot(test_response[index_200//2:index_200]*3)
+
+for frequency in frequencies:
+    stimulus = SinusoidalStimulus(frequency=frequency).sample(t)
+    response = DoubleGammaHRF().transform(stimulus, tr)/normalization_factor
+    delays.append(response_delay(stimulus[index_200:], response[index_200:], tr, frequency))
+
+plt.figure()
+plt.plot(frequencies, delays, label="Response delay")
+plt.plot(frequencies, 1/frequencies, label="Period")
+plt.ylabel("Response delays relate to stimulus")
+plt.xlabel("Stimulus Frequency (Hz)")
+plt.legend()
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: <matplotlib.legend.Legend at 0x16b02adc0>
+#+attr_org: :width 372
+[[file:./.ob-jupyter/4365547fe7efdccb2b0438ffca447521b9533f33.png]]
+#+attr_org: :width 392
+[[file:./.ob-jupyter/0ad4cef9f1a4093651a00ce63386de2e58812241.png]]
+:END:
+

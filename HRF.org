@@ -77,9 +77,12 @@ plt.legend()
 #+end_src
 
 #+RESULTS:
-: <matplotlib.legend.Legend at 0x1714aa460>
+:RESULTS:
+: <matplotlib.legend.Legend at 0x171593c40>
 #+attr_org: :width 380
 [[file:./.ob-jupyter/1224e9dba4f53a640b15489415d8a1c8320b75e5.png]]
+:END:
+
 
 
 

@@ -1,0 +1,163 @@
+#+TITLE: Convolving a stimulus with an HRF
+
+In page 420 of Gary Glover's 1999 paper we find an analytic expression proposed for the BOLD impulse response. This expression became famous as the "Glover HRF", or the double-gamma HRF which is commonly used to model fMRI responses.
+
+The Glover HRF can be written as the sum of two gamma pdfs, and it is parameterized by their peak delay and dispersion coefficients. The first gamma models a positive BOLD response, and the second gamma models an undershoot. The final parameters that determine the HRF are the relative contributions (or the ratio) of these HRFs.
+
+#+begin_src python
+def original_glover(t, n1=6., t1=0.9, a2=0.35, n2=12., t2=0.9):
+    peak = t ** n1 * np.exp(-t / t1)
+    undershoot = t ** n2 * np.exp(-t / t2)
+    
+    c1 = peak.max()
+    c2 = undershoot.max()
+
+    return peak / c1 - a2 * undershoot / c2
+#+end_src
+
+#+RESULTS:
+
+Using the scipy library, which provides an implementation of the gamma pdf parameterized in standard form with location and scale parameters, we can write instead:
+
+#+begin_src python :tangle yani/hrfs.py
+from dataclasses import dataclass
+from scipy.stats import gamma
+import numpy as np
+
+
+@dataclass
+class DoubleGammaHRF:
+    """Default values will return Glover's HRF for the auditory cortex."""
+
+    peak_delay: float = 6.0
+    peak_width: float = 0.9
+    undershoot_delay: float = 12.0
+    undershoot_width: float = 0.9
+    positive_negative_ratio: float = 0.35
+
+    def sample(self, t: np.array):
+        peak = gamma.pdf(
+            t, self.peak_delay / self.peak_width, loc=0, scale=self.peak_width
+        )
+        undershoot = gamma.pdf(
+            t,
+            self.undershoot_delay / self.undershoot_width,
+            loc=0,
+            scale=self.undershoot_width,
+        )
+        peak_norm = peak.max()
+        undershoot_norm = undershoot.max()
+        hrf = (
+            peak / peak_norm
+            - undershoot / undershoot_norm * self.positive_negative_ratio
+        )
+        return hrf
+
+    def transform(self, signal: np.array, tr=0.02):
+        sample_times = np.arange(0, 32, tr)  # Sample 30 seconds at 20ms intervals.
+        convolved = np.convolve(signal, self.sample(sample_times))
+        # The return size of the convolved signal is len(signal) + len(sample_times) +1.
+        # To get what we want we need to discard the extra time.
+        return convolved[: -(len(sample_times) - 1)]
+#+end_src
+
+#+RESULTS:
+
+In the implementation above, we define an HRF object with two functionalities. The method =sample= will return the HRF sampled at whatever times we choose, and the method =transform= will take a signal and return it convolved with the hrf. 
+
+Let's first verify it's doing the correct thing:
+
+#+begin_src python
+t = np.arange(0, 32, 0.02)
+
+plt.plot(t, original_glover(t), label="Glover 1999")
+plt.plot(t, DoubleGammaHRF().sample(t), label="Scipy Gamma")
+plt.legend()
+
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+: <matplotlib.legend.Legend at 0x170b408b0>
+#+attr_org: :width 380
+[[file:./.ob-jupyter/1224e9dba4f53a640b15489415d8a1c8320b75e5.png]]
+:END:
+
+
+
+So now let us implement a stimulus and check what it looks like convolved with the HRF.
+
+#+begin_src python :tangle yani/hrfs.py
+@dataclass
+class SinusoidalStimulus:
+    start_offset: float = 14
+    frequency: float = 0.2
+    exponent: float = 1.
+    luminance: float = 1.
+
+    def sample(self, t: np.array):
+        period = 1 / self.frequency
+        _, time = np.divmod(self.start_offset, period)
+        phase_offset = (time / period) * (2 * np.pi) + np.pi
+        y_offset, y_norm = 1, 2
+        osc = (
+            (np.cos(2 * np.pi * self.frequency * t - phase_offset) + y_offset) / y_norm
+        ) ** self.exponent * self.luminance
+        osc = np.where(t < self.start_offset, 0, osc)
+        return osc
+
+#+end_src
+
+#+RESULTS:
+
+
+#+begin_src python
+tr = 0.874
+t = np.arange(0, 300, tr)
+stim = SinusoidalStimulus().sample(t)
+
+plt.plot(t, stim)
+plt.plot(t, DoubleGammaHRF().transform(stim, tr))
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+| <matplotlib.lines.Line2D | at | 0x171376250> |
+#+attr_org: :width 372
+[[file:./.ob-jupyter/7d3becc50bfe5299217776c334b77ee0ff65071a.png]]
+:END:
+
+Note that because we are scaling the HRF, we cannot directly interpret the amplitude of our response unless we renormalize it. For that we can use the convolved response we obtain for a given stimulus as a reference, and the maximum amplitude of that response we set to our normalization factor.
+
+So let's do just that, setting as a reference the response to a stimulus of frequency 0.005 (200 second oscillation).
+
+#+begin_src python
+# Normalization factor
+reference_stim = SinusoidalStimulus(frequency=0.005).sample(t)
+convolved_response = DoubleGammaHRF().transform(reference_stim, tr)
+
+plt.plot(t, reference_stim)
+plt.plot(t, convolved_response)
+
+normalization_factor = convolved_response.max()
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+#+attr_org: :width 372
+[[file:./.ob-jupyter/1d6ee0dd8b737a5d30135149de3d7305ce1fa03f.png]]
+:END:
+
+And now we can replot the previous figure, using our renormalization factor for scaling:
+
+#+begin_src python
+plt.plot(t, stim)
+plt.plot(t, DoubleGammaHRF().transform(stim, tr)/normalization_factor)
+#+end_src
+
+#+RESULTS:
+:RESULTS:
+| <matplotlib.lines.Line2D | at | 0x171434f40> |
+#+attr_org: :width 372
+[[file:./.ob-jupyter/827a8cac79e3f8f9bf32037f7d9037a850aea9b0.png]]
+:END:
